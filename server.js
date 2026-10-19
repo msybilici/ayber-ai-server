@@ -118,7 +118,7 @@ const server = http.createServer(async (req, res) => {
 
     const result = await upstream.json();
     if (!upstream.ok) {
-      console.error('Gemini status:', upstream.status, 'code:', result.error?.code);
+      console.error('Gemini error:', upstream.status, JSON.stringify(result.error));
       return reply(res, 502, { error: 'ai_provider_error' });
     }
     const answer = (result.candidates || [])
