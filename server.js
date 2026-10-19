@@ -6,6 +6,7 @@ const PORT = Number(process.env.PORT || 8080);
 const KEY = process.env.GEMINI_API_KEY;
 const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const TOKEN = process.env.AYBER_ACCESS_TOKEN;
+
 const MAX_DAILY = Number(process.env.MAX_DAILY_REQUESTS || 100);
 const MAX_PER_IP_HOUR = Number(process.env.MAX_PER_IP_HOUR || 12);
 const requests = new Map();
