@@ -13,7 +13,6 @@ const requests = new Map();
 let dailyCount = 0;
 let day = new Date().toISOString().slice(0, 10);
 
-
 const reply = (res, status, payload) => {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
@@ -21,6 +20,40 @@ const reply = (res, status, payload) => {
   });
   res.end(JSON.stringify(payload));
 };
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Temporary overloads are retried, but quota/auth/model errors are not.
+async function requestGemini(url, body) {
+  const delays = [0, 1200, 2800];
+  for (let attempt = 0; attempt < delays.length; attempt++) {
+    if (delays[attempt]) await sleep(delays[attempt]);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 25000);
+    try {
+      const upstream = await fetch(url, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': KEY
+        },
+        body
+      });
+      const result = await upstream.json();
+      if (upstream.ok) return { upstream, result };
+      console.error('Gemini error:', upstream.status, JSON.stringify(result.error), 'attempt:', attempt + 1);
+      if (![503, 502, 504].includes(upstream.status) || attempt === delays.length - 1) {
+        return { upstream, result };
+      }
+    } catch (err) {
+      console.error('Gemini connection error:', err.name, 'attempt:', attempt + 1);
+      if (attempt === delays.length - 1) throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
 
 const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
@@ -90,35 +123,16 @@ const server = http.createServer(async (req, res) => {
     requests.set(ip, record);
     dailyCount++;
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 25000);
-    let upstream;
-    try {
-      upstream = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent`,
-        {
-          method: 'POST',
-          signal: controller.signal,
-          headers: {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': KEY
-          },
-          body: JSON.stringify({
-            systemInstruction: {
-              parts: [{ text: `Sen ${name} adlı yardımcı asistansın. Kullanıcının diline uygun yanıt ver (dil: ${language}). Telefon arama veya SMS gönderme işlemini yaptığını iddia etme.` }]
-            },
-            contents,
-            generationConfig: { maxOutputTokens: 700 }
-          })
-        }
-      );
-    } finally {
-      clearTimeout(timer);
-    }
-
-    const result = await upstream.json();
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent`;
+    const body = JSON.stringify({
+      systemInstruction: {
+        parts: [{ text: `Sen ${name} adlı yardımcı asistansın. Kullanıcının diline uygun yanıt ver (dil: ${language}). Telefon arama veya SMS gönderme işlemini yaptığını iddia etme.` }]
+      },
+      contents,
+      generationConfig: { maxOutputTokens: 700 }
+    });
+    const { upstream, result } = await requestGemini(url, body);
     if (!upstream.ok) {
-      console.error('Gemini error:', upstream.status, JSON.stringify(result.error));
       return reply(res, 502, { error: 'ai_provider_error' });
     }
     const answer = (result.candidates || [])
