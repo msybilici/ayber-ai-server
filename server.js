@@ -58,7 +58,7 @@ function isEconomyNews(q) {
 function newsFeedUrl(question, lang, region = {}) {
   const country = /^[A-Z]{2}$/.test(region.countryCode || '') ? region.countryCode : (lang === 'tr' ? 'TR' : 'US');
   const gl = country;
-  const hl = lang === 'tr' ? 'tr-TR' : (lang === 'en' ? 'en-US' : `${lang}-${gl}`);
+  const hl = lang === 'tr' ? 'tr-TR' : 'en-US';
   const topic = isEconomyNews(question) ? 'BUSINESS' : isSports(question) ? 'SPORTS' :
     /dünya|world|global|uluslararası/i.test(question) ? 'WORLD' :
     /teknoloji|technology/i.test(question) ? 'TECHNOLOGY' : '';
@@ -83,8 +83,18 @@ function newsDetailNumber(q) {
 }
 async function shortNewsReply(question, lang, detailNumber = 0, categoryQuestion = '', region = {}) {
   try {
-    const rss = await fetchText(newsFeedUrl(categoryQuestion || question, lang, region));
-    const items = parseNewsItems(rss);
+    let items = [];
+    const feed = newsFeedUrl(categoryQuestion || question, lang, region);
+    try { items = parseNewsItems(await fetchText(feed, 12000)); }
+    catch (e) { console.error('Google News RSS unavailable:', e.message); }
+    if (!items.length) {
+      const term = isEconomyNews(categoryQuestion || question) ? 'economy finance' :
+        isSports(categoryQuestion || question) ? 'sports' : 'latest news';
+      const location = region.city || region.countryCode || (lang === 'tr' ? 'Türkiye' : '');
+      const bing = 'https://www.bing.com/news/search?format=rss&q=' + encodeURIComponent(term + ' ' + location);
+      try { items = parseNewsItems(await fetchText(bing, 12000)); }
+      catch (e) { console.error('Bing News RSS unavailable:', e.message); }
+    }
     if (!items.length) throw new Error('empty_feed');
     if (detailNumber) {
       const x = items[detailNumber - 1];
@@ -101,7 +111,7 @@ async function shortNewsReply(question, lang, detailNumber = 0, categoryQuestion
       (lang === 'tr' ? '\n\nBir haberin ayrıntısı için başlığına dokun veya “1. haberin detayı” yaz.' : '\n\nTap a headline or ask for “news 1”.');
   } catch (err) {
     console.error('News feed error:', err.name, err.message);
-    return lang === 'tr' ? 'Şu anda haber kaynağına bağlanamıyorum. Lütfen biraz sonra tekrar dene.' : 'News feed unavailable. Try again later.';
+    return lang === 'tr' ? 'Haber akışına şu anda erişilemiyor. Haberleri tarayıcıda aç: https://news.google.com/?hl=tr&gl=TR&ceid=TR:tr' : 'News feed unavailable. Try again later.';
   }
 }
 function needsWikipedia(text) {
@@ -219,11 +229,12 @@ async function mgmWeather(city, tomorrow) {
   const stationId = mgmValue(station,'gunlukTahminIstNo','istNo','istno','merkezId','merkezid');
   if (!stationId) throw new Error('mgm_station_unavailable');
   const days = mgmList(await mgmJson('/web/tahminler/gunluk?istno=' + encodeURIComponent(stationId)));
-  const entry = days[tomorrow ? 1 : 0];
+  const entry = days.length === 1 ? days[0] : days[tomorrow ? 1 : 0];
   if (!entry) throw new Error('mgm_forecast_unavailable');
-  const min = mgmValue(entry,'enDusukGun1','enDusuk','minSicaklik','min');
-  const max = mgmValue(entry,'enYuksekGun1','enYuksek','maxSicaklik','max');
-  const event = mgmValue(entry,'hadiseGun1','hadise','durum');
+  const dayNo = days.length === 1 && tomorrow ? 2 : 1;
+  const min = mgmValue(entry,`enDusukGun${dayNo}`,'enDusuk','minSicaklik','min');
+  const max = mgmValue(entry,`enYuksekGun${dayNo}`,'enYuksek','maxSicaklik','max');
+  const event = mgmValue(entry,`hadiseGun${dayNo}`,'hadise','durum');
   // Do not fabricate numbers or assume undocumented field names.
   if (min === null && max === null && event === null) throw new Error('mgm_fields_unrecognized');
   return `${city} — ${tomorrow ? 'yarın' : 'bugün'} hava tahmini (MGM)\n` +
@@ -242,7 +253,8 @@ async function weatherReply(question, language) {
       try { return await mgmWeather(place.name, /(yarın|tomorrow)/i.test(question)); }
       catch (mgmError) {
         console.error('MGM unavailable:', mgmError.message);
-        return `${place.name} için Meteoroloji Genel Müdürlüğü verisine şu anda erişilemiyor. Resmî tahmin: https://www.mgm.gov.tr/`;
+        console.error('Falling back to Open-Meteo (MGM unavailable)');
+        // Use Open-Meteo as an explicitly identified fallback, never label it MGM.
       }
     }
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${place.latitude}&longitude=${place.longitude}&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code&forecast_days=2&timezone=auto`;
@@ -253,7 +265,7 @@ async function weatherReply(question, language) {
     const ix = tomorrow ? 1 : 0;
     const heading = `${place.name}${place.admin1 ? ', ' + place.admin1 : ''} — ${tomorrow ? 'yarın' : 'bugün'} hava durumu`;
     const detail = `${weatherLabel(d.weather_code?.[ix] ?? c.weather_code)}. En düşük ${d.temperature_2m_min?.[ix]}°C, en yüksek ${d.temperature_2m_max?.[ix]}°C. Yağış olasılığı %${d.precipitation_probability_max?.[ix] ?? 'bilinmiyor'}.`;
-    return `${heading}\n${detail}\nŞu an: ${c.temperature_2m}°C (hissedilen ${c.apparent_temperature}°C), nem %${c.relative_humidity_2m}, rüzgâr ${c.wind_speed_10m} km/sa.\nKaynak: Open-Meteo (tahminler değişebilir).`;
+    return `${heading}\n${detail}\nŞu an: ${c.temperature_2m}°C (hissedilen ${c.apparent_temperature}°C), nem %${c.relative_humidity_2m}, rüzgâr ${c.wind_speed_10m} km/sa.\nKaynak: Open-Meteo (MGM erişilemezse alternatif tahmin; tahminler değişebilir).`;
   } catch (err) {
     console.error('Weather service unavailable:', err.name);
     return 'Şu anda hava durumu servisine bağlanamıyorum. Lütfen biraz sonra tekrar dene.';
