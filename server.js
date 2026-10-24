@@ -62,26 +62,42 @@ function newsFeedUrl(question, lang) {
     ? `https://news.google.com/rss/headlines/section/topic/${topic}?hl=${hl}&gl=${gl}&ceid=${gl}:${lang === 'tr' ? 'tr' : 'en'}`
     : `https://news.google.com/rss?hl=${hl}&gl=${gl}&ceid=${gl}:${lang === 'tr' ? 'tr' : 'en'}`;
 }
-async function shortNewsReply(question, lang) {
+function parseNewsItems(rss) {
+  return [...rss.matchAll(/<item(?:\s[^>]*)?>([\s\S]*?)<\/item>/gi)].slice(0, 10).map(m => {
+    const xml = m[1];
+    const get = tag => decodeXml(xml.match(new RegExp('<' + tag + '(?:\\s[^>]*)?>([\\s\\S]*?)<\\/' + tag + '>', 'i'))?.[1] || '');
+    const link = get('link');
+    return { title: get('title').slice(0, 220), source: get('source').slice(0, 80),
+      description: get('description').slice(0, 650), link: /^https:\/\//i.test(link) ? link : '',
+      date: get('pubDate') };
+  }).filter(x => x.title);
+}
+function newsDetailNumber(q) {
+  const m = q.match(/(?:^|\s)(\d{1,2})\s*(?:\.|\)|numaralı|nolu|inci|ıncı|uncu|üncü)?\s*(?:haber(?:in|i)?|başlık|detay|aç|oku)/i)
+    || q.match(/(?:haber|başlık)\s*(\d{1,2})\b/i);
+  return m ? Number(m[1]) : 0;
+}
+async function shortNewsReply(question, lang, detailNumber = 0, categoryQuestion = '') {
   try {
-    const rss = await fetchText(newsFeedUrl(question, lang));
-    const items = [...rss.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0, 5).map(m => {
-      const xml = m[1];
-      const title = decodeXml(xml.match(/<title>([\s\S]*?)<\/title>/)?.[1] || '');
-      const source = decodeXml(xml.match(/<source(?:\s[^>]*)?>([\s\S]*?)<\/source>/)?.[1] || '');
-      const dateRaw = decodeXml(xml.match(/<pubDate>([\s\S]*?)<\/pubDate>/)?.[1] || '');
-      const date = dateRaw && !Number.isNaN(Date.parse(dateRaw))
-        ? new Date(dateRaw).toLocaleDateString(lang === 'tr' ? 'tr-TR' : 'en-US', { timeZone: 'UTC', day: 'numeric', month: 'long', year: 'numeric' }) : '';
-      return {title: title.slice(0, 220), source: source.slice(0, 80), date};
-    }).filter(x => x.title);
+    const rss = await fetchText(newsFeedUrl(categoryQuestion || question, lang));
+    const items = parseNewsItems(rss);
     if (!items.length) throw new Error('empty_feed');
+    if (detailNumber) {
+      const x = items[detailNumber - 1];
+      if (!x) return lang === 'tr' ? 'Bu numarada haber yok. 1 ile 5 arasında bir haber seç.' : 'No headline at that number.';
+      return (lang === 'tr' ? 'Haber: ' : 'Headline: ') + x.title + '\n' +
+        (x.source ? (lang === 'tr' ? 'Kaynak: ' : 'Source: ') + x.source + '\n' : '') +
+        (x.description ? (lang === 'tr' ? 'RSS özeti: ' : 'RSS summary: ') + x.description + '\n' : '') +
+        (lang === 'tr' ? 'Tam haber için bağlantıya dokun:\n' : 'Open full story:\n') + x.link +
+        (lang === 'tr' ? '\nNot: Bu tam makale değil, RSS özetidir.' : '\nNote: This is an RSS summary, not the full article.');
+    }
     const header = lang === 'tr' ? (isSports(question) ? 'Güncel spor başlıkları:' : 'Güncel haber başlıkları:')
       : (isSports(question) ? 'Latest sports headlines:' : 'Latest headlines:');
-    return header + '\n\n' + items.map((x, i) => `${i + 1}. ${x.title}${x.source ? ' — ' + x.source : ''}${x.date ? ' (' + x.date + ')' : ''}`).join('\n\n') +
-      (lang === 'tr' ? '\n\nKaynak: Google News RSS. Bunlar haber başlıklarıdır; tam haber metni değildir.' : '\n\nSource: Google News RSS; headlines only.');
+    return header + '\n\n' + items.slice(0, 5).map((x, i) => `${i + 1}. ${x.title}${x.source ? ' — ' + x.source : ''}`).join('\n\n') +
+      (lang === 'tr' ? '\n\nBir haberin ayrıntısı için başlığına dokun veya “1. haberin detayı” yaz.' : '\n\nTap a headline or ask for “news 1”.');
   } catch (err) {
-    console.error('News feed error:', err.name);
-    return lang === 'tr' ? 'Şu anda güncel haber kaynağına bağlanamıyorum. Lütfen biraz sonra tekrar dene.' : 'The live news feed is currently unavailable. Please try again later.';
+    console.error('News feed error:', err.name, err.message);
+    return lang === 'tr' ? 'Şu anda haber kaynağına bağlanamıyorum. Lütfen biraz sonra tekrar dene.' : 'News feed unavailable. Try again later.';
   }
 }
 function needsWikipedia(text) {
@@ -92,7 +108,7 @@ function needsWikipedia(text) {
 function webSearchIntent(q) {
   // Broad public-web lookup: informational questions, products, places, sports,
   // travel, recipes, technology, and current events.
-  return /\\S/.test(q);
+  return /\S/.test(q);
 }
 function requiresLiveSource(q) {
   return /(bugün|yarın|şu an|şimdi|güncel|son dakika|son durum|en son|bu hafta|bu ay|2026|fiyat|kaç tl|döviz|kur|borsa|altın|sonuç|skor|puan durumu|canlı|açık mı|çalışma saat|latest|today|tomorrow|currently|right now|price|stock|exchange rate|live score)/i.test(q);
@@ -267,6 +283,11 @@ const server = http.createServer(async (req, res) => {
       && /^[\\p{L}\\s'’.-]{2,80}$/u.test(question.trim());
     if (weatherIntent(question) || weatherFollowup) {
       return reply(res, 200, { reply: await weatherReply(question, language) });
+    }
+    const requestedNewsNumber = newsDetailNumber(question);
+    const previousNewsQuestion = [...input].reverse().slice(1).find(m => m.role === 'user' && needsNews(m.content))?.content || '';
+    if (requestedNewsNumber && previousNewsQuestion) {
+      return reply(res, 200, { reply: await shortNewsReply(question, language, requestedNewsNumber, previousNewsQuestion) });
     }
     if (needsNews(question)) {
       return reply(res, 200, { reply: await shortNewsReply(question, language) });
