@@ -143,14 +143,18 @@ async function freeWebContext(question, language) {
 
 // Open-Meteo free weather API: no paid search or API key required.
 function weatherIntent(q) {
-  return /(hava\s*durumu|hava\s*nasıl|hava\s*kaç\s*derece|sıcaklık|yağmur\s*yağacak|weather|temperature|forecast)/i.test(q);
+  return /(hava\s*(?:durumu|durum|dumru|nasıl|tahmini)|kaç\s*derece|sıcaklık|yağmur\s*yağacak|kar\s*yağacak|weather|temperature|forecast)/i.test(q);
 }
 function weatherPlace(q) {
-  let cleaned = q.replace(/\b(today|tomorrow|weather|temperature|forecast|in|for|the|please)\b/gi, ' ')
-    .replace(/(hava\s*durumu|hava\s*nasıl|hava\s*kaç\s*derece|sıcaklık|yağmur\s*yağacak|bugün|yarın|şu\s*an|kaç\s*derece|nedir|nasıl|göster|söyle|öğren|lütfen|için|da|de|mi|mı|mu|mü|\?)/gi, ' ')
-    .replace(/[.,!?]/g, ' ').replace(/\s+/g, ' ').trim();
-  cleaned = cleaned.replace(/['’](?:da|de|ta|te|nın|nin|nun|nün)$/i, '')
-    .replace(/\\b(?:da|de|ta|te)$/i, '').trim();
+  let cleaned = String(q)
+    .replace(/\b(today|tomorrow|weather|temperature|forecast|please)\b/gi, ' ')
+    .replace(/(?:hava\s*(?:durumu|durum|dumru|nasıl|tahmini)|kaç\s*derece|sıcaklık|yağmur\s*yağacak|kar\s*yağacak|bugün|yarın|şu\s*an|nedir|nasıl|göster|söyle|öğren|lütfen)/gi, ' ')
+    .replace(/[?!.,]/g, ' ')
+    .replace(/\b(?:için|in|for|the|mi|mı|mu|mü)\b/gi, ' ')
+    .replace(/\s+/g, ' ').trim();
+  // Remove Turkish location suffixes only at word endings, not inside city names.
+  cleaned = cleaned.replace(/['’](?:da|de|ta|te|nın|nin|nun|nün|ın|in|un|ün)$/i, '');
+  cleaned = cleaned.replace(/\s+(?:da|de|ta|te)$/i, '').trim();
   return cleaned.slice(0, 80);
 }
 function weatherLabel(code) {
@@ -258,7 +262,10 @@ const server = http.createServer(async (req, res) => {
     dailyCount++;
 
     const question = input[input.length - 1].content;
-    if (weatherIntent(question)) {
+    const previousAssistant = [...input].reverse().find(m => m.role === 'assistant')?.content || '';
+    const weatherFollowup = /hangi şehir|which city/i.test(previousAssistant)
+      && /^[\\p{L}\\s'’.-]{2,80}$/u.test(question.trim());
+    if (weatherIntent(question) || weatherFollowup) {
       return reply(res, 200, { reply: await weatherReply(question, language) });
     }
     if (needsNews(question)) {
