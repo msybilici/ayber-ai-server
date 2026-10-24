@@ -464,7 +464,7 @@ const server = http.createServer(async (req, res) => {
     if (!documentPart && requestedNewsNumber && previousNewsQuestion) {
       return reply(res, 200, { reply: await shortNewsReply(question, language, requestedNewsNumber, previousNewsQuestion, region) });
     }
-    if (!documentPart && needsNews(question)) {
+    if (!documentPart && (needsNews(question) || /^(?:haberler|haber|news|ekonomi haberleri|spor haberleri)$/i.test(question.trim()))) {
       return reply(res, 200, { reply: await shortNewsReply(question, language, 0, '', region) });
     }
     const wantsWeb = webSearchIntent(question);
@@ -490,7 +490,11 @@ const server = http.createServer(async (req, res) => {
       // Deliberately no tools.google_search: avoids paid grounding calls.
     });
     const { upstream, result } = await requestGemini(url, body);
-    if (!upstream.ok) return reply(res, 502, { error: 'ai_provider_error' });
+    if (!upstream.ok) {
+      const code = upstream.status === 429 ? 'gemini_quota_exceeded' :
+        upstream.status === 401 || upstream.status === 403 ? 'gemini_auth_error' : 'ai_provider_error';
+      return reply(res, upstream.status === 429 ? 429 : 502, { error: code });
+    }
     const answer = (result.candidates || [])
       .flatMap(candidate => candidate.content?.parts || [])
       .map(part => typeof part.text === 'string' ? part.text : '')
