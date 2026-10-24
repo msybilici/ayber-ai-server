@@ -50,12 +50,16 @@ function isSports(text) {
 }
 function needsNews(text) {
   const q = text.toLocaleLowerCase('tr-TR');
-  return (isSports(q) && /(haber|gündem|son dakika|sonuç|skor|puan durumu|bugün|latest|news)/i.test(q)) || /^(spor|spor haberleri|futbol haberleri)$/i.test(q.trim()) || /(haber|gündem|son dakika|bugün dünyada|bugün türkiye|dünyada neler oldu|güncel olay|son gelişme|news|headlines|breaking|what happened today|latest events)/i.test(q);
+  return (isEconomyNews(q) && /(haber|news|gündem|son dakika)/i.test(q)) || /^(ekonomi|finans|piyasalar)$/i.test(q.trim()) || (isSports(q) && /(haber|gündem|son dakika|sonuç|skor|puan durumu|bugün|latest|news)/i.test(q)) || /^(spor|spor haberleri|futbol haberleri)$/i.test(q.trim()) || /(haber|gündem|son dakika|bugün dünyada|bugün türkiye|dünyada neler oldu|güncel olay|son gelişme|news|headlines|breaking|what happened today|latest events)/i.test(q);
 }
-function newsFeedUrl(question, lang) {
-  const gl = lang === 'tr' ? 'TR' : 'US';
-  const hl = lang === 'tr' ? 'tr-TR' : 'en-US';
-  const topic = isSports(question) ? 'SPORTS' :
+function isEconomyNews(q) {
+  return /(ekonomi|ekonomik|finans|finance|business news|economy|piyasa haber|borsa haber|döviz haber|altın haber|kripto haber)/i.test(q);
+}
+function newsFeedUrl(question, lang, region = {}) {
+  const country = /^[A-Z]{2}$/.test(region.countryCode || '') ? region.countryCode : (lang === 'tr' ? 'TR' : 'US');
+  const gl = country;
+  const hl = lang === 'tr' ? 'tr-TR' : (lang === 'en' ? 'en-US' : `${lang}-${gl}`);
+  const topic = isEconomyNews(question) ? 'BUSINESS' : isSports(question) ? 'SPORTS' :
     /dünya|world|global|uluslararası/i.test(question) ? 'WORLD' :
     /teknoloji|technology/i.test(question) ? 'TECHNOLOGY' : '';
   return topic
@@ -77,9 +81,9 @@ function newsDetailNumber(q) {
     || q.match(/(?:haber|başlık)\s*(\d{1,2})\b/i);
   return m ? Number(m[1]) : 0;
 }
-async function shortNewsReply(question, lang, detailNumber = 0, categoryQuestion = '') {
+async function shortNewsReply(question, lang, detailNumber = 0, categoryQuestion = '', region = {}) {
   try {
-    const rss = await fetchText(newsFeedUrl(categoryQuestion || question, lang));
+    const rss = await fetchText(newsFeedUrl(categoryQuestion || question, lang, region));
     const items = parseNewsItems(rss);
     if (!items.length) throw new Error('empty_feed');
     if (detailNumber) {
@@ -91,7 +95,7 @@ async function shortNewsReply(question, lang, detailNumber = 0, categoryQuestion
         (lang === 'tr' ? 'Tam haber için bağlantıya dokun:\n' : 'Open full story:\n') + x.link +
         (lang === 'tr' ? '\nNot: Bu tam makale değil, RSS özetidir.' : '\nNote: This is an RSS summary, not the full article.');
     }
-    const header = lang === 'tr' ? (isSports(question) ? 'Güncel spor başlıkları:' : 'Güncel haber başlıkları:')
+    const header = lang === 'tr' ? (isEconomyNews(question) ? 'Güncel ekonomi haberleri:' : isSports(question) ? 'Güncel spor başlıkları:' : 'Güncel haber başlıkları:')
       : (isSports(question) ? 'Latest sports headlines:' : 'Latest headlines:');
     return header + '\n\n' + items.slice(0, 5).map((x, i) => `${i + 1}. ${x.title}${x.source ? ' — ' + x.source : ''}`).join('\n\n') +
       (lang === 'tr' ? '\n\nBir haberin ayrıntısı için başlığına dokun veya “1. haberin detayı” yaz.' : '\n\nTap a headline or ask for “news 1”.');
@@ -183,6 +187,49 @@ function weatherLabel(code) {
   if ([95,96,99].includes(code)) return 'Gök gürültülü';
   return 'Durum bilgisi mevcut değil';
 }
+// MGM public website endpoints are undocumented; availability may change.
+async function mgmJson(path) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8500);
+  try {
+    const response = await fetch('https://servis.mgm.gov.tr' + path, {
+      signal: controller.signal,
+      headers: { 'Accept': 'application/json', 'Origin': 'https://www.mgm.gov.tr',
+        'Referer': 'https://www.mgm.gov.tr/', 'User-Agent': 'Mozilla/5.0 AYBER-AI' }
+    });
+    if (!response.ok) throw new Error('mgm_http_' + response.status);
+    return await response.json();
+  } finally { clearTimeout(timer); }
+}
+function mgmList(value) {
+  if (Array.isArray(value)) return value;
+  if (Array.isArray(value?.data)) return value.data;
+  if (Array.isArray(value?.veri)) return value.veri;
+  return [];
+}
+function mgmValue(row, ...keys) {
+  for (const key of keys) if (row?.[key] !== null && row?.[key] !== undefined && row[key] !== '') return row[key];
+  return null;
+}
+async function mgmWeather(city, tomorrow) {
+  const slug = city.toLocaleLowerCase('tr-TR').replace(/ı/g,'i').replace(/ğ/g,'g')
+    .replace(/ü/g,'u').replace(/ş/g,'s').replace(/ö/g,'o').replace(/ç/g,'c');
+  const locations = mgmList(await mgmJson('/web/merkezler/ililcesi?il=' + encodeURIComponent(slug)));
+  const station = locations.find(x => String(mgmValue(x,'ilce','ilceAdi') || '').toLocaleLowerCase('tr-TR') === 'merkez') || locations[0];
+  const stationId = mgmValue(station,'gunlukTahminIstNo','istNo','istno','merkezId','merkezid');
+  if (!stationId) throw new Error('mgm_station_unavailable');
+  const days = mgmList(await mgmJson('/web/tahminler/gunluk?istno=' + encodeURIComponent(stationId)));
+  const entry = days[tomorrow ? 1 : 0];
+  if (!entry) throw new Error('mgm_forecast_unavailable');
+  const min = mgmValue(entry,'enDusukGun1','enDusuk','minSicaklik','min');
+  const max = mgmValue(entry,'enYuksekGun1','enYuksek','maxSicaklik','max');
+  const event = mgmValue(entry,'hadiseGun1','hadise','durum');
+  // Do not fabricate numbers or assume undocumented field names.
+  if (min === null && max === null && event === null) throw new Error('mgm_fields_unrecognized');
+  return `${city} — ${tomorrow ? 'yarın' : 'bugün'} hava tahmini (MGM)\n` +
+    [event && `Hadise: ${event}`, min !== null && `En düşük: ${min}°C`, max !== null && `En yüksek: ${max}°C`].filter(Boolean).join('\n') +
+    '\nKaynak: Meteoroloji Genel Müdürlüğü (MGM) — https://www.mgm.gov.tr/';
+}
 async function weatherReply(question, language) {
   const city = weatherPlace(question);
   if (!city) return 'Hangi şehir için hava durumunu öğrenmek istiyorsun? Örneğin: Bursa hava durumu.';
@@ -191,6 +238,13 @@ async function weatherReply(question, language) {
     const geo = JSON.parse(await fetchText(geoUrl, 8000));
     const place = (geo.results || []).find(x => x.country_code === 'TR') || (geo.results || [])[0];
     if (!place) return `“${city}” için konum bulamadım. Şehir adını yeniden yazar mısın?`;
+    if (place.country_code === 'TR') {
+      try { return await mgmWeather(place.name, /(yarın|tomorrow)/i.test(question)); }
+      catch (mgmError) {
+        console.error('MGM unavailable:', mgmError.message);
+        return `${place.name} için Meteoroloji Genel Müdürlüğü verisine şu anda erişilemiyor. Resmî tahmin: https://www.mgm.gov.tr/`;
+      }
+    }
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${place.latitude}&longitude=${place.longitude}&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code&forecast_days=2&timezone=auto`;
     const forecast = JSON.parse(await fetchText(url, 8000));
     if (typeof forecast.current?.temperature_2m !== 'number') throw new Error('missing_weather');
@@ -204,6 +258,84 @@ async function weatherReply(question, language) {
     console.error('Weather service unavailable:', err.name);
     return 'Şu anda hava durumu servisine bağlanamıyorum. Lütfen biraz sonra tekrar dene.';
   }
+}
+
+
+const currencyByCountry = {
+ TR:'TRY',US:'USD',GB:'GBP',DE:'EUR',FR:'EUR',IT:'EUR',ES:'EUR',NL:'EUR',
+ BE:'EUR',AT:'EUR',PT:'EUR',IE:'EUR',GR:'EUR',FI:'EUR',JP:'JPY',CN:'CNY',
+ KR:'KRW',IN:'INR',RU:'RUB',UA:'UAH',AZ:'AZN',UZ:'UZS',KZ:'KZT',
+ CA:'CAD',AU:'AUD',NZ:'NZD',CH:'CHF',SE:'SEK',NO:'NOK',DK:'DKK',
+ PL:'PLN',CZ:'CZK',HU:'HUF',RO:'RON',BG:'BGN',BR:'BRL',MX:'MXN',
+ AE:'AED',SA:'SAR',EG:'EGP',ZA:'ZAR',ID:'IDR',MY:'MYR',SG:'SGD',
+ TH:'THB',VN:'VND',PK:'PKR',BD:'BDT',IL:'ILS'
+};
+function localTimeIntent(q) {
+ return /(saat kaç|şu an saat|yerel saat|burada saat|hangi gün|bugünün tarihi|bugün ayın kaçı|local time|what time is it|current time|today.s date)/i.test(q);
+}
+function localTimeReply(region, language) {
+ const zone = region.timeZone;
+ if (!zone) return language === 'tr' ? 'Yerel saat için konum izni ver veya bir şehir belirt.' : 'Please enable region settings or specify a city.';
+ try {
+   const locale = language === 'tr' ? 'tr-TR' : language;
+   const date = new Intl.DateTimeFormat(locale,{timeZone:zone, dateStyle:'full',timeStyle:'short'}).format(new Date());
+   return `${region.city || zone}: ${date}\nSaat dilimi: ${zone}`;
+ } catch { return 'Saat dilimi doğrulanamadı. Telefonun saat ayarlarını kontrol et.'; }
+}
+function currencyIntent(q) {
+ return /(döviz|para birimi|hangi para|kaç (?:tl|lira|dolar|euro|avro)|(?:usd|eur|try|gbp|jpy|chf)\s*(?:kaç|to|in)|kur (?:nedir|kaç)|exchange rate|convert currency|currency conversion)/i.test(q);
+}
+function currencyCode(text) {
+ const q = text.toLocaleLowerCase('tr-TR');
+ const names = [['USD',/dolar|dollar|usd/],['EUR',/euro|avro|eur/],['TRY',/türk liras|tl\b|lira|try/],['GBP',/sterlin|pound|gbp/],['JPY',/yen|jpy/],['CHF',/frank|chf/],['CAD',/kanada doları|cad/],['AUD',/avustralya doları|aud/]];
+ return names.filter(([,re]) => re.test(q)).map(([code])=>code);
+}
+async function currencyReply(question, region, language) {
+ const codes = currencyCode(question);
+ const base = codes[0] || 'USD';
+ const target = codes[1] || currencyByCountry[region.countryCode] || 'TRY';
+ if (base === target) return `${base} ve ${target} aynı para birimi. Başka bir para birimi belirt.`;
+ try {
+  const url = `https://open.er-api.com/v6/latest/${base}`;
+  const data = JSON.parse(await fetchText(url,8500));
+  const rate = data.rates?.[target];
+  if (data.result !== 'success' || typeof rate !== 'number') throw new Error('rate_missing');
+  const amount = Number(question.match(/\b\d+(?:[.,]\d+)?\b/)?.[0]?.replace(',','.') || '1');
+  return `${amount} ${base} ≈ ${(amount * rate).toLocaleString(language === 'tr' ? 'tr-TR' : 'en-US',{maximumFractionDigits:2})} ${target}\n1 ${base} = ${rate} ${target}\nKaynak: ExchangeRate-API (ücretsiz açık uç nokta). Güncelleme: ${data.time_last_update_utc || 'bilinmiyor'}. Anlık işlem kuru olmayabilir.`;
+ } catch { return 'Döviz kuru kaynağına şu anda erişilemiyor. Doğrulanmamış kur vermiyorum.'; }
+}
+function nearbyIntent(q) {
+ return /(yakınımda|yakındaki|yakınlarda|en yakın|çevremde|near me|nearby|closest|around me)/i.test(q);
+}
+function nearbyType(q) {
+ if (/eczane|pharmacy/i.test(q)) return ['amenity','pharmacy'];
+ if (/hastane|hospital/i.test(q)) return ['amenity','hospital'];
+ if (/restoran|restaurant|yemek|lokanta/i.test(q)) return ['amenity','restaurant'];
+ if (/kafe|kahve|cafe|coffee/i.test(q)) return ['amenity','cafe'];
+ if (/market|supermarket/i.test(q)) return ['shop','supermarket'];
+ if (/atm|bankamatik/i.test(q)) return ['amenity','atm'];
+ if (/banka|bank/i.test(q)) return ['amenity','bank'];
+ if (/otel|hotel/i.test(q)) return ['tourism','hotel'];
+ if (/benzin|petrol|fuel/i.test(q)) return ['amenity','fuel'];
+ return null;
+}
+async function nearbyReply(question, region) {
+ if (!region.city) return 'Yakındaki yerleri bulmak için “Konumumu kullan” yaz veya şehir belirt.';
+ const type = nearbyType(question);
+ if (!type) return 'Şimdilik eczane, hastane, restoran, kafe, market, ATM, banka, otel ve benzin istasyonu arayabilirim.';
+ try {
+   const query = `${region.city}${region.countryCode ? ', '+region.countryCode : ''}`;
+   const geo = JSON.parse(await fetchText('https://geocoding-api.open-meteo.com/v1/search?name='+encodeURIComponent(region.city)+'&count=10&format=json',8000));
+   const p = (geo.results||[]).find(x=>x.country_code===region.countryCode) || (geo.results||[])[0];
+   if (!p) throw new Error('city_not_found');
+   const overpass = `[out:json][timeout:12];(nwr["${type[0]}"="${type[1]}"](around:3000,${p.latitude},${p.longitude}););out center 12;`;
+   const response = await fetchText('https://overpass.kumi.systems/api/interpreter?data='+encodeURIComponent(overpass),15000);
+   const items = JSON.parse(response).elements?.filter(x=>x.tags?.name).slice(0,8)||[];
+   if (!items.length) return `${region.city} merkezine yakın doğrulanmış sonuç bulamadım.`;
+   return `${region.city} şehir merkezinin yaklaşık 3 km çevresindeki kayıtlar (tam konumun değil):\n` +
+      items.map((x,i)=>`${i+1}. ${x.tags.name}${x.tags['addr:street']?' — '+x.tags['addr:street']:''}`).join('\n') +
+      '\nKaynak: OpenStreetMap/Overpass. Açık olma ve mesafe bilgisi doğrulanmadı.';
+ } catch { return 'Yakındaki yerler kaynağına şu anda erişilemiyor. Daha sonra tekrar dene.'; }
 }
 
 async function requestGemini(url, body) {
@@ -270,6 +402,12 @@ const server = http.createServer(async (req, res) => {
 
     const name = String(data.assistantName || 'AYBER').replace(/[\r\n]/g, ' ').slice(0, 24);
     const language = String(data.language || 'tr').slice(0, 12);
+    const regionRaw = data.region && typeof data.region === 'object' ? data.region : {};
+    const region = {
+      city: typeof regionRaw.city === 'string' ? regionRaw.city.replace(/[^\p{L}\s'’-]/gu, '').trim().slice(0, 70) : '',
+      countryCode: /^[A-Z]{2}$/.test(regionRaw.countryCode || '') ? regionRaw.countryCode : '',
+      timeZone: typeof regionRaw.timeZone === 'string' ? regionRaw.timeZone.slice(0, 60) : ''
+    };
     const contents = input.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }));
 
     record.count++;
@@ -280,17 +418,28 @@ const server = http.createServer(async (req, res) => {
     const question = input[input.length - 1].content;
     const previousAssistant = [...input].reverse().find(m => m.role === 'assistant')?.content || '';
     const weatherFollowup = /hangi şehir|which city/i.test(previousAssistant)
-      && /^[\\p{L}\\s'’.-]{2,80}$/u.test(question.trim());
+      && /^[\p{L}\s'’.-]{2,80}$/u.test(question.trim());
+    if (localTimeIntent(question) && !/\b(?:tokyo|londra|new york|paris)\b/i.test(question)) {
+      return reply(res, 200, {reply: localTimeReply(region, language)});
+    }
+    if (currencyIntent(question) && !needsNews(question)) {
+      return reply(res, 200, {reply: await currencyReply(question, region, language)});
+    }
+    if (nearbyIntent(question)) {
+      return reply(res, 200, {reply: await nearbyReply(question, region)});
+    }
     if (weatherIntent(question) || weatherFollowup) {
-      return reply(res, 200, { reply: await weatherReply(question, language) });
+      const cityProvided = weatherPlace(question);
+      const weatherQuestion = cityProvided || !region.city ? question : `${region.city} ${question}`;
+      return reply(res, 200, { reply: await weatherReply(weatherQuestion, language) });
     }
     const requestedNewsNumber = newsDetailNumber(question);
     const previousNewsQuestion = [...input].reverse().slice(1).find(m => m.role === 'user' && needsNews(m.content))?.content || '';
     if (requestedNewsNumber && previousNewsQuestion) {
-      return reply(res, 200, { reply: await shortNewsReply(question, language, requestedNewsNumber, previousNewsQuestion) });
+      return reply(res, 200, { reply: await shortNewsReply(question, language, requestedNewsNumber, previousNewsQuestion, region) });
     }
     if (needsNews(question)) {
-      return reply(res, 200, { reply: await shortNewsReply(question, language) });
+      return reply(res, 200, { reply: await shortNewsReply(question, language, 0, '', region) });
     }
     const wantsWeb = webSearchIntent(question);
     const webContext = await freeWebContext(question, language);
@@ -299,7 +448,8 @@ const server = http.createServer(async (req, res) => {
         ? 'Şu anda canlı web arama kaynaklarına ulaşamıyorum. Güncel bilgiyi doğrulayamadığım için sonuç uydurmayacağım. Biraz sonra tekrar deneyebilirsin.'
         : 'Live web search sources are unavailable. I cannot verify current information right now; please try again later.' });
     }
-    const instruction = `Sen ${name} adlı yardımcı asistansın. Kullanıcının diline uygun yanıt ver (dil: ${language}). Telefon arama veya SMS gönderme işlemini yaptığını iddia etme. ` +
+    const regionContext = region.city ? `Kullanıcının açık izniyle belirlenen şehir: ${region.city}; ülke kodu: ${region.countryCode}; saat dilimi: ${region.timeZone}. Yerel sorularda bunu dikkate al, doğrulanmamış güncel bilgi uydurma. ` : '';
+    const instruction = regionContext + `Sen ${name} adlı yardımcı asistansın. Kullanıcının diline uygun yanıt ver (dil: ${language}). Telefon arama veya SMS gönderme işlemini yaptığını iddia etme. ` +
       `Harici kaynak verildiyse yalnızca gerçekten içerdiği bilgileri güncel kaynak olarak kullan, kaynak bağlantılarını belirt. ` +
       `Kaynak yoksa internette arama yaptığını iddia etme. Kaynak varsa kısa, okunabilir bir yanıt ver; uzun URL'leri gövdeye yapıştırma, en fazla 2 kısa kaynak bağlantısı ekle. ` +
       `Arama sonuçları yalnızca özetlerdir, tam sayfayı okuduğunu iddia etme. Kaynağın doğrulamadığı güncel bilgiyi uydurma. Haber başlıklarının tam makale olmadığını unut.`;
