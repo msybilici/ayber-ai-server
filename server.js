@@ -6,7 +6,6 @@ const PORT = Number(process.env.PORT || 8080);
 const KEY = process.env.GEMINI_API_KEY;
 const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const TOKEN = process.env.AYBER_ACCESS_TOKEN;
-
 const MAX_DAILY = Number(process.env.MAX_DAILY_REQUESTS || 100);
 const MAX_PER_IP_HOUR = Number(process.env.MAX_PER_IP_HOUR || 12);
 const requests = new Map();
@@ -20,7 +19,6 @@ const reply = (res, status, payload) => {
   });
   res.end(JSON.stringify(payload));
 };
-
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // Temporary overloads are retried, but quota/auth/model errors are not.
@@ -53,6 +51,23 @@ async function requestGemini(url, body) {
       clearTimeout(timer);
     }
   }
+}
+
+// Allow only Google Search grounding sources with public http(s) URLs.
+function extractSources(result) {
+  const sources = [];
+  const seen = new Set();
+  for (const candidate of result.candidates || []) {
+    for (const item of candidate.groundingMetadata?.groundingChunks || []) {
+      const uri = item.web?.uri;
+      const title = item.web?.title;
+      if (typeof uri !== 'string' || !/^https?:\/\//i.test(uri) || seen.has(uri)) continue;
+      seen.add(uri);
+      sources.push({ title: String(title || 'Kaynak').slice(0, 160), url: uri });
+      if (sources.length >= 5) return sources;
+    }
+  }
+  return sources;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -126,9 +141,10 @@ const server = http.createServer(async (req, res) => {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent`;
     const body = JSON.stringify({
       systemInstruction: {
-        parts: [{ text: `Sen ${name} adlı yardımcı asistansın. Kullanıcının diline uygun yanıt ver (dil: ${language}). Telefon arama veya SMS gönderme işlemini yaptığını iddia etme.` }]
+        parts: [{ text: `Sen ${name} adlı yardımcı asistansın. Kullanıcının diline uygun yanıt ver (dil: ${language}). Telefon arama veya SMS gönderme işlemini yaptığını iddia etme. Güncel bilgiler için Google Search aracını gerektiğinde kullan. Arama yapmadıysan güncel bilgiyi doğruladığını iddia etme. Gereksiz yıldız, Markdown ve emoji kullanma.` }]
       },
       contents,
+      tools: [{ googleSearch: {} }],
       generationConfig: { maxOutputTokens: 700 }
     });
     const { upstream, result } = await requestGemini(url, body);
@@ -140,7 +156,17 @@ const server = http.createServer(async (req, res) => {
       .map(part => typeof part.text === 'string' ? part.text : '')
       .join('\n')
       .trim();
-    return reply(res, 200, { reply: answer || 'Şu anda yanıt oluşturamadım.' });
+    const sources = extractSources(result);
+    // Keep 'reply' unchanged for the existing Android app. Append source links
+    // to the displayed reply because the current Android client only reads 'reply'.
+    const sourceText = sources.length
+      ? '\n\nKaynaklar:\n' + sources.map((s, i) => `${i + 1}. ${s.title}: ${s.url}`).join('\n')
+      : '';
+    return reply(res, 200, {
+      reply: (answer || 'Şu anda yanıt oluşturamadım.') + sourceText,
+      sources,
+      webSearchUsed: Boolean((result.candidates || []).some(c => c.groundingMetadata?.webSearchQueries?.length || c.groundingMetadata?.groundingChunks?.length))
+    });
   } catch (err) {
     console.error('Request error:', err.name);
     return reply(res, 500, { error: 'request_failed' });
