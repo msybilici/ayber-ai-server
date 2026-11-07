@@ -510,9 +510,7 @@ const server = http.createServer(async (req, res) => {
       systemInstruction: { parts: [{ text: instruction }] },
       contents,
       generationConfig: {
-        maxOutputTokens: 2048,
-        // Gemini 2.5 Flash: düşünme bütçesi uzun yanıtların çıktı kotasını tüketmesin.
-        thinkingConfig: { thinkingBudget: 0 }
+        maxOutputTokens: 2048
       }
       // Deliberately no tools.google_search: avoids paid grounding calls.
     });
@@ -537,7 +535,7 @@ const server = http.createServer(async (req, res) => {
             { role: 'model', parts: [{ text: answer }] },
             { role: 'user', parts: [{ text: 'Yanıtını kaldığın yerden tamamla. Önceki metni tekrar etme.' }] }
           ],
-          generationConfig: { maxOutputTokens: 2048, thinkingConfig: { thinkingBudget: 0 } }
+          generationConfig: { maxOutputTokens: 2048 }
         });
         const next = await requestGemini(url, continuation);
         if (next.upstream.ok) {
